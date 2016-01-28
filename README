@@ -13,8 +13,6 @@ To release new version of debian package
 
 To install:
 
-```
 sudo add-apt-repository ppa:ramses-tech/ramses
 sudo apt-get update
 sudo apt-get install ramses
-```
