@@ -1,0 +1,193 @@
+#! /usr/bin/env python
+from __future__ import print_function
+
+import os
+import sys
+import tarfile
+import tempfile
+from io import BytesIO
+from argparse import ArgumentParser
+
+MAIN_CONTAINER = 'ramses_app'
+DOCKERFILE = '''
+FROM python:3.4
+ENV PYTHONUNBUFFERED 1
+RUN mkdir /code
+WORKDIR /code
+RUN pip install ramses
+RUN echo "{engine_id}" | pcreate -s ramses_starter ramses_app
+WORKDIR /code/ramses_app
+COPY . /code/ramses_app/
+RUN curl --location --silent --show-error --fail \
+        https://github.com/Barzahlen/waitforservices/releases/download/v0.3/waitforservices \
+        > /usr/local/bin/waitforservices && \
+    chmod +x /usr/local/bin/waitforservices
+CMD waitforservices; pserve local.ini
+'''
+
+
+class Command(object):
+    containers = ()
+    cli = None
+    engines_params = {
+        'sqla': {
+            'repo': 'postgres',
+            'tag': 'latest',
+            'ports': {5432: 5432},
+        },
+        'mongodb': {
+            'repo': 'mongo',
+            'tag': 'latest',
+            'ports': {27017: 27017},
+        },
+    }
+    engines_ids = {
+        'sqla': '1',
+        'mongodb': '2',
+    }
+
+    def __init__(self):
+        parser = ArgumentParser(description=__doc__)
+        parser.add_argument(
+            '-p', '--path',
+            help=('Path to folder containing raml file. Defaults '
+                  'to current folder.'),
+            default='.')
+        parser.add_argument(
+            '-e', '--engine',
+            help='Engine to use. Either "sqla" or "mongodb".',
+            default='sqla', choices=['sqla', 'mongodb'])
+        self.args = parser.parse_args()
+        self.install_dependencies()
+
+    def install_dependencies(self):
+        try:
+            import docker
+        except ImportError:
+            log('Installing missing libraries')
+            import subprocess
+            subprocess.call('pip install docker-py==1.6', shell=True)
+
+    def run(self):
+        from docker import Client
+        try:
+            if sys.platform.startswith('darwin'):
+                from docker.utils import kwargs_from_env
+                kwargs = kwargs_from_env()
+                if len(kwargs) == 0:
+                    log('Environment variables not found. Did you run: '
+                        'eval "$(docker-machine env <machine_name>)"?')
+                    return
+                kwargs['tls'].assert_hostname = False
+                self.cli = Client(**kwargs)
+            else:
+                self.cli = Client(
+                    base_url='unix://var/run/docker.sock',
+                    version='auto')
+            db_params = self.engines_params[self.args.engine]
+            db_cont = self.prepare_container(**db_params)
+            es_cont = self.prepare_container(
+                repo='elasticsearch', tag='1.7',
+                ports={9200: 9200})
+            web_cont = self.run_main_container(db_cont, es_cont)
+            self.stream_output(web_cont)
+        except Exception as ex:
+            log('\nError: ' + str(ex))
+        except KeyboardInterrupt:
+            log('KeyboardInterrupt')
+        finally:
+            self.stop_containers()
+
+    def pull_image(self, repo, tag):
+        img_name = '{}:{}'.format(repo, tag)
+        if self.cli.images(name=img_name, quiet=True):
+            log('Image already exists: {}'.format(img_name))
+            return
+        log('Pulling image: {}'.format(img_name))
+        self.cli.pull(repo, tag=tag)
+
+    def prepare_container(self, repo, tag, ports):
+        self.pull_image(repo, tag)
+        img_name = '{}:{}'.format(repo, tag)
+        log('Creating container from image "{}"'.format(img_name))
+        host_config = self.cli.create_host_config(
+            port_bindings=ports)
+        container = self.cli.create_container(
+            image=img_name,
+            host_config=host_config,
+            ports=list(ports.keys()))
+        cont_id = container.get('Id')
+        log('Starting container {}'.format(cont_id))
+        self.cli.start(container=cont_id)
+        self.containers += (cont_id,)
+        return container
+
+    def _get_context_tar(self):
+        # Create tmp tar file
+        tmp_file = tempfile.NamedTemporaryFile()
+        tar = tarfile.open(mode='w', fileobj=tmp_file)
+
+        # Add Dockerfile
+        dockerfile = DOCKERFILE.format(
+            engine_id=self.engines_ids[self.args.engine],
+        )
+        dockerfile_obj = BytesIO(dockerfile.encode('utf-8'))
+        dfinfo = tarfile.TarInfo('Dockerfile')
+        dfinfo.size = len(dockerfile_obj.getvalue())
+        dockerfile_obj.seek(0)
+        tar.addfile(dfinfo, dockerfile_obj)
+
+        # Add path files
+        ctx_path = os.path.abspath(self.args.path)
+        tar.add(ctx_path, arcname='')
+        tar.close()
+        tmp_file.seek(0)
+        return tmp_file
+
+    def run_main_container(self, db_cont, es_cont):
+        log('Building image "{}"'.format(MAIN_CONTAINER))
+        ctx_tar = self._get_context_tar()
+        list(self.cli.build(
+            fileobj=ctx_tar, custom_context=True,
+            rm=True, forcerm=True,
+            tag=MAIN_CONTAINER))
+
+        log('Creating container from image "{}"'.format(MAIN_CONTAINER))
+        ports = {6543: 6543}
+        host_config = self.cli.create_host_config(
+            port_bindings=ports,
+            links={
+                db_cont.get('Id'): 'db',
+                es_cont.get('Id'): 'es',
+            }
+        )
+        web_cont = self.cli.create_container(
+            image=MAIN_CONTAINER,
+            ports=list(ports.keys()),
+            host_config=host_config)
+        web_cont_id = web_cont.get('Id')
+        log('Starting container {}'.format(web_cont_id))
+        self.cli.start(container=web_cont_id)
+        self.containers += (web_cont_id,)
+        return web_cont
+
+    def stream_output(self, cont):
+        for line in self.cli.logs(cont.get('Id'), stream=True):
+            log(line)
+
+    def stop_containers(self):
+        if not self.containers or self.cli is None:
+            return
+        log('\nPlease wait for {} containers to stop'.format(
+            len(self.containers)))
+        for cont_id in self.containers:
+            log('Stopping container: {}'.format(cont_id))
+            self.cli.stop(cont_id)
+
+
+def log(msg):
+    print(msg)
+
+
+if __name__ == '__main__':
+    Command().run()

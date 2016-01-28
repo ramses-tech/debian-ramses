@@ -1,0 +1,5 @@
+ramses (0.2) trusty; urgency=low
+
+  * Added OSX support
+
+ -- Artem Kostiuk <postatum@gmail.com>  Tue, 28 Jan 2016 09:05:03 +0200

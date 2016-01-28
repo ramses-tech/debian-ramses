@@ -1,0 +1,12 @@
+Source: ramses
+Section: utils
+Priority: optional
+Maintainer: Ramses developers, <hello@ramses.tech>
+Build-Depends: debhelper (>= 9), python (>= 2.7)
+Standards-Version: 3.9.5
+X-Python3-Version: >= 2.7
+
+Package: ramses
+Architecture: all
+Depends: ${misc:Depends}, ${python:Depends}
+Description: Tool to run Ramses framework with Postgres/Mongo & Elasticsearch as linked Docker containers
