@@ -1,11 +1,11 @@
 Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: ramses
-Source: https://github.com/brandicted/ramses
+Source: https://github.com/ramses-tech/ramses
 
 Files: *
-Copyright: 2016, Sosign Interactive Inc.
+Copyright: Ramses Tech, Inc.
 License: Apache-2.0
 
 Files: debian/*
-Copyright: 2016, Sosign Interactive Inc.
+Copyright: Ramses Tech, Inc.
 License: Apache-2.0
